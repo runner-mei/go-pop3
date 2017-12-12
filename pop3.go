@@ -96,6 +96,16 @@ func NewClient(conn net.Conn) (*Client, error) {
 	return &Client{Text: text, conn: conn}, nil
 }
 
+func (c *Client) Stls(config *tls.Config) error {
+	err := c.cmdSimple("STLS")
+	if err != nil {
+		return err
+	}
+	c.conn = tls.Client(c.conn, config)
+	c.Text = NewConn(c.conn)
+	return nil
+}
+
 // User issues a USER command to the server using the provided user name.
 func (c *Client) User(user string) error {
 	return c.cmdSimple("USER %s", user)
@@ -237,69 +247,28 @@ func (c *Client) Quit() error {
 	return c.cmdSimple("QUIT")
 }
 
+// ReceiveMailTls connects to the TLS server at addr, and authenticates with
+// user and pass, and calling receiveFn for each mail.
+func ReceiveMailTls(addr, user, pass, cert string, receiveFn ReceiveMailFunc) error {
+	return receiveMail(addr, user, pass, true, cert, receiveFn)
+}
+
 // ReceiveMail connects to the server at addr,
 // and authenticates with user and pass,
 // and calling receiveFn for each mail.
 func ReceiveMail(addr, user, pass string, receiveFn ReceiveMailFunc) error {
-	c, err := Dial(addr)
-
-	if err != nil {
-		return err
-	}
-
-	defer func() {
-		if err != nil && err != EOF {
-			c.Rset()
-		}
-
-		c.Quit()
-		c.Close()
-	}()
-
-	if err = c.User(user); err != nil {
-		return err
-	}
-
-	if err = c.Pass(pass); err != nil {
-		return err
-	}
-
-	var mis []MessageInfo
-
-	if mis, err = c.UidlAll(); err != nil {
-		return err
-	}
-
-	for _, mi := range mis {
-		var data string
-
-		data, err = c.Retr(mi.Number)
-
-		del, err := receiveFn(mi.Number, mi.Uid, data, err)
-
-		if err != nil && err != EOF {
-			return err
-		}
-
-		if del {
-			if err = c.Dele(mi.Number); err != nil {
-				return err
-			}
-		}
-
-		if err == EOF {
-			break
-		}
-	}
-
-	return nil
+	return receiveMail(addr, user, pass, false, "", receiveFn)
 }
 
-// ReceiveMailTls connects to the TLS server at addr, and authenticates with
-// user and pass, and calling receiveFn for each mail.
-func ReceiveMailTls(addr, user, pass, cert string, receiveFn ReceiveMailFunc) error {
-	c, err := DialTls(addr, cert, true)
+func receiveMail(addr, user, pass string, ssl bool, cert string, receiveFn ReceiveMailFunc) error {
+	var c *Client
+	var err error
 
+	if !ssl {
+		c, err = Dial(addr)
+	} else {
+		c, err = DialTls(addr, cert, ssl)
+	}
 	if err != nil {
 		return err
 	}
@@ -354,7 +323,7 @@ func ReceiveMailTls(addr, user, pass, cert string, receiveFn ReceiveMailFunc) er
 
 // ReceiveMailFunc is the type of the function called for each mail.
 // Its arguments are mail's number, uid, data, and mail receiving error.
-// if this function returns false value, the mail will be deleted,
+// if this function returns true value, the mail will be deleted,
 // if its returns EOF, skip the all mail of remaining.
 // (after deleting mail, if necessary)
 type ReceiveMailFunc func(number int, uid, data string, err error) (bool, error)
